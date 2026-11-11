@@ -1,10 +1,26 @@
-# StudioNermi Cloud Lab
+# StudioNermi Cloud Lab 2.0
 
-A simple Python desktop application built with PySide6, featuring a dark interface.
+A Python and PySide6 desktop workspace with a clean dark interface, large controls,
+and three resizable panels. No API keys or cloud account are required.
 
-- **Open File** opens a file picker and displays the selected filename. It does not edit or execute the file.
-- **Settings** displays information about the theme; configurable preferences are not implemented yet.
+- **Open Project** selects a local folder. The Project Explorer shows its files
+  and folders, including hidden entries. Expand folders and select a file to preview it.
+- **Code Preview** is read-only, with Python syntax highlighting, including
+  multiline strings. UTF-8 text files up to 1 MiB are supported. Binary, oversized,
+  missing, or unreadable files display an explanatory message.
+- **Open File** retains the original standalone file picker and now previews the
+  selected file as well as displaying its name and full path in a tooltip.
+- **AI Assistant** accepts a message with Send or Enter and displays an explicit
+  offline response. **The assistant is not yet connected to a cloud service.**
+  Messages and project contents are never sent anywhere. Conversation text stays
+  in memory only and disappears when the app closes.
+- **Settings** displays the current dark appearance, read-only behavior, and
+  offline assistant status. There are no configurable preferences yet.
 - **Exit** closes the application.
+
+Opening a project or file never imports or executes project code. Files cannot be
+edited, renamed, or deleted through the explorer or preview. The app does not
+restore a previous project or execute anything at startup.
 
 ## Run on Linux Mint
 
@@ -20,22 +36,26 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-For subsequent launches, enter the project directory, activate `.venv`, and run
-`python main.py`. Do not run the application with sudo.
+For subsequent launches, activate `.venv` in the project directory and run
+`python main.py`. Do not run the application with sudo. Recommended desktop
+resolution: 1440 × 900 or larger; minimum window size: 960 × 640.
 
-If Qt reports a missing `xcb` plugin dependency, confirm the system packages above
-are installed. For a Wayland-specific issue, try `QT_QPA_PLATFORM=xcb python main.py`
-from your desktop session.
+If Qt reports a missing `xcb` dependency, confirm the system packages above are
+installed. For a Wayland issue, try `QT_QPA_PLATFORM=xcb python main.py` from your
+desktop session.
 
-## Tests in a cloud environment
+## Automated tests
 
-After installing the requirements in the virtual environment:
+After installing requirements and activating the virtual environment:
 
 ```bash
 QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
-These tests create the real Qt window and exercise file selection, cancellation,
-the Settings dialog, and Exit without a display server. The file picker result is
-mocked; native desktop file picker integration and visual appearance should also
-be checked manually on Linux Mint.
+Tests instantiate real Qt widgets and cover project selection, nested folders,
+file selection and preview without executing code, cancellation, read-only
+controls, Python highlighting and multiline strings, switching to plain text,
+file errors and limits, offline assistant interactions, Settings, and Exit.
+Only native picker results are mocked. No additional test dependencies are needed.
+Native file picker integration and desktop appearance should also be checked on
+Linux Mint.
