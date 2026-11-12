@@ -1,4 +1,4 @@
-"""StudioNermi Cloud Lab 2.0: local, read-only project browsing."""
+"""StudioNermi Cloud Lab 3.0: local, read-only project browsing."""
 
 import keyword
 import re
@@ -8,14 +8,74 @@ from pathlib import Path
 from PySide6.QtCore import QDir, Qt
 from PySide6.QtGui import QColor, QFontDatabase, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTreeView,
     QVBoxLayout, QWidget,
 )
 
-VERSION = "2.0"
+from assistant import AssistantWorker, Credentials
+
+VERSION = "3.0"
 MAX_PREVIEW_BYTES = 1024 * 1024
-OFFLINE_MESSAGE = "AI assistant is not yet connected to a cloud service. No messages or project files are sent. No API key is required."
+CLOUD_MESSAGE = "OpenAI API · Only your conversation is sent. Local files are not uploaded. API usage is billed separately from ChatGPT Plus."
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, credentials, model, parent=None):
+        super().__init__(parent)
+        self.credentials = credentials
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(540)
+        layout = QVBoxLayout(self)
+        info = QLabel("StudioNermi Cloud Lab 3.0\nDark theme · Read-only files\n\n"
+                      "OPENAI_API_KEY takes priority over session and keyring keys.\n"
+                      "Enter a replacement key below; existing keys are never displayed.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        self.key_input = QLineEdit()
+        self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_input.setPlaceholderText("OpenAI API key (leave blank to keep current key)")
+        self.key_input.setAccessibleName("OpenAI API key")
+        layout.addWidget(self.key_input)
+        self.persist = QCheckBox("Save in system keyring (Linux Secret Service only)")
+        layout.addWidget(self.persist)
+        layout.addWidget(QLabel("OpenAI model"))
+        self.model_input = QLineEdit(model)
+        layout.addWidget(self.model_input)
+        self.status = QLabel("Keys stay in memory unless secure keyring storage is selected.")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        forget = QPushButton("Forget session and saved key")
+        forget.clicked.connect(self.forget)
+        layout.addWidget(forget)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.finished.connect(lambda _: self.key_input.clear())
+
+    def save(self):
+        if not self.model_input.text().strip():
+            self.status.setText("Enter a model name.")
+            return
+        key = self.key_input.text().strip()
+        if key:
+            try:
+                self.credentials.save(key, self.persist.isChecked())
+            except Exception:
+                self.status.setText("Secure keyring unavailable or locked. Unlock it, or uncheck keyring storage to use a session key.")
+                return
+        self.accept()
+
+    def forget(self):
+        self.credentials.session_key = ''
+        self.key_input.clear()
+        try:
+            self.credentials.forget()
+            self.status.setText("Session and saved key removed. Environment variables are unchanged.")
+        except Exception:
+            self.status.setText("Session key cleared. Saved key could not be removed; check your system keyring. Environment variables are unchanged.")
+
 
 
 class PythonHighlighter(QSyntaxHighlighter):
@@ -66,7 +126,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.project_path = None
-        self.setWindowTitle("StudioNermi Cloud Lab 2.0")
+        self.credentials = Credentials()
+        self.ai_model = "gpt-4.1-mini"
+        self.history = []
+        self.worker = None
+        self.closing = False
+        self.setWindowTitle("StudioNermi Cloud Lab 3.0")
         self.resize(1400, 850)
         self.setMinimumSize(960, 640)
         content = QWidget()
@@ -74,7 +139,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(18)
         header = QHBoxLayout()
-        title = QLabel("StudioNermi Cloud Lab 2.0")
+        title = QLabel("StudioNermi Cloud Lab 3.0")
         title.setObjectName("title")
         header.addWidget(title)
         header.addStretch()
@@ -129,22 +194,29 @@ class MainWindow(QMainWindow):
         self.highlighter = PythonHighlighter(self.preview.document())
         preview.addWidget(self.preview, 1)
         assistant = panel("AI Assistant")
-        notice = QLabel(OFFLINE_MESSAGE)
+        notice = QLabel(CLOUD_MESSAGE)
         notice.setWordWrap(True)
         assistant.addWidget(notice)
         self.chat = QPlainTextEdit()
         self.chat.setReadOnly(True)
-        self.chat.setPlaceholderText("Cloud connection coming in a future release.")
+        self.chat.setPlaceholderText("Describe a project or ask a programming question.")
         assistant.addWidget(self.chat, 1)
         self.assistant_input = QLineEdit()
         self.assistant_input.setPlaceholderText("Type a message…")
         self.assistant_input.setAccessibleName("Message to AI assistant")
         assistant.addWidget(self.assistant_input)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_request)
+        self.ai_status = QLabel("Ready · Configure an API key in Settings or OPENAI_API_KEY")
+        self.ai_status.setWordWrap(True)
+        assistant.addWidget(self.ai_status)
+        assistant.addWidget(self.stop_button)
         self.send_button = QPushButton("Send")
         assistant.addWidget(self.send_button)
         splitter.setSizes([260, 650, 360])
         splitter.setChildrenCollapsible(False)
-        layout.addWidget(QLabel("Local workspace  •  Files are previewed only  •  AI offline"))
+        layout.addWidget(QLabel("Local workspace  •  Files are previewed only  •  OpenAI API"))
         self.setCentralWidget(content)
         self.project_button.clicked.connect(self.open_project)
         self.open_button.clicked.connect(self.open_file)
@@ -159,7 +231,8 @@ class MainWindow(QMainWindow):
             QLabel#heading { color: #a9bfff; font-size: 18px; font-weight: bold; }
             QPushButton { background: #2c3952; border: 1px solid #536789;
                 border-radius: 7px; padding: 11px 16px; min-height: 22px; }
-            QPushButton:hover { background: #3a4e70; }
+            QPushButton:disabled { background: #202632; color: #8591a5; border-color: #354159; }
+            QPushButton:hover:enabled { background: #3a4e70; }
             QPushButton:pressed { background: #202c40; }
             QPushButton:focus, QLineEdit:focus, QPlainTextEdit:focus, QTreeView:focus {
                 border: 2px solid #a9bfff; }
@@ -220,16 +293,69 @@ class MainWindow(QMainWindow):
 
     def send_message(self):
         message = self.assistant_input.text().strip()
-        if not message:
+        if not message or self.worker is not None:
             return
-        self.chat.appendPlainText(f"You: {message}\n\nAssistant: {OFFLINE_MESSAGE}\n")
+        key = self.credentials.resolve()
+        if not key:
+            self.ai_status.setText("No API key configured. Set OPENAI_API_KEY or open Settings.")
+            return
+        self.pending_message = message
+        self.chat.appendPlainText(f"You: {message}\n")
         self.assistant_input.clear()
+        self.ai_status.setText("Waiting for OpenAI…")
+        self.send_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.settings_button.setEnabled(False)
+        self.worker = AssistantWorker(key, self.ai_model,
+            self.history + [{'role': 'user', 'content': message}], self)
+        self.worker.succeeded.connect(self.receive_response)
+        self.worker.failed.connect(self.request_failed)
+        self.worker.cancelled.connect(lambda: self.request_failed("Request stopped. Remote processing may still incur charges."))
+        self.worker.finished.connect(self.request_finished)
+        self.worker.start()
+
+    def receive_response(self, text):
+        if self.worker._stop.is_set():
+            self.request_failed("Request stopped. Remote processing may still incur charges.")
+            return
+        self.history.extend([{'role': 'user', 'content': self.pending_message},
+                             {'role': 'assistant', 'content': text}])
+        self.chat.appendPlainText(f"Assistant: {text}\n")
+        self.ai_status.setText("Ready")
+
+    def request_failed(self, message):
+        self.ai_status.setText(message)
+        self.chat.appendPlainText(f"Status: {message}\n")
+
+    def stop_request(self):
+        if self.worker:
+            self.worker.stop()
+            self.stop_button.setEnabled(False)
+            self.ai_status.setText("Stopping request…")
+
+    def request_finished(self):
+        self.worker.deleteLater()
+        self.worker = None
+        self.send_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.settings_button.setEnabled(True)
+        if self.closing:
+            self.close()
+
+    def closeEvent(self, event):
+        if self.worker is not None:
+            self.closing = True
+            self.stop_request()
+            event.ignore()
+        else:
+            event.accept()
 
     def show_settings(self):
-        QMessageBox.information(self, "Settings", "StudioNermi Cloud Lab 2.0\n\n"
-            "Appearance: dark theme with large, readable controls.\n"
-            "Project files: read-only preview; never executed automatically.\n\n"
-            + OFFLINE_MESSAGE + "\n\nThere are no configurable settings yet.")
+        dialog = SettingsDialog(self.credentials, self.ai_model, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ai_model = dialog.model_input.text().strip()
+            self.ai_status.setText("Settings updated · Ready to send")
+        dialog.deleteLater()
 
 
 def main():

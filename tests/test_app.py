@@ -5,11 +5,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer
 from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
-from main import MainWindow, MAX_PREVIEW_BYTES, OFFLINE_MESSAGE, PythonHighlighter
+from PySide6.QtWidgets import QLineEdit
+
+def dialog_password_mode():
+    return QLineEdit.EchoMode.Password
+
+
+from main import MainWindow, MAX_PREVIEW_BYTES, CLOUD_MESSAGE, PythonHighlighter
 
 
 class ApplicationTests(unittest.TestCase):
@@ -28,11 +34,13 @@ class ApplicationTests(unittest.TestCase):
 
     def tearDown(self):
         self.window.close()
+        self.window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.app.processEvents()
         self.temp.cleanup()
 
     def test_window_and_read_only_controls(self):
-        self.assertEqual(self.window.windowTitle(), 'StudioNermi Cloud Lab 2.0')
+        self.assertEqual(self.window.windowTitle(), 'StudioNermi Cloud Lab 3.0')
         self.assertTrue(self.window.preview.isReadOnly())
         self.assertTrue(self.window.model.isReadOnly())
         self.assertTrue(self.window.chat.isReadOnly())
@@ -106,31 +114,28 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(document.findBlockByNumber(2).userState(), 0)
         self.assertGreaterEqual(len(document.lastBlock().layout().formats()), 3)
 
-    def test_assistant_offline_and_empty_message(self):
+    def test_assistant_missing_key_and_empty_message(self):
         self.window.send_button.click()
         self.assertEqual(self.window.chat.toPlainText(), '')
         self.window.assistant_input.setText('Explain this file')
-        self.window.send_button.click()
-        self.assertIn('You: Explain this file', self.window.chat.toPlainText())
-        self.assertIn(OFFLINE_MESSAGE, self.window.chat.toPlainText())
-        self.assertEqual(self.window.assistant_input.text(), '')
-        self.window.assistant_input.setText('Second message')
-        self.window.assistant_input.returnPressed.emit()
-        self.assertIn('Second message', self.window.chat.toPlainText())
+        with patch.object(self.window.credentials, 'resolve', return_value=''):
+            self.window.send_button.click()
+        self.assertIn('No API key', self.window.ai_status.text())
+        self.assertIsNone(self.window.worker)
+        self.assertEqual(self.window.assistant_input.text(), 'Explain this file')
 
     def test_settings_dialog(self):
         observed = []
 
         def dismiss():
             dialog = self.app.activeModalWidget()
-            observed.append((dialog.windowTitle(), dialog.text()))
+            observed.append((dialog.windowTitle(), dialog.key_input.echoMode()))
             dialog.accept()
 
         QTimer.singleShot(0, dismiss)
         self.window.settings_button.click()
         self.assertEqual(observed[0][0], 'Settings')
-        self.assertIn('dark theme', observed[0][1])
-        self.assertIn(OFFLINE_MESSAGE, observed[0][1])
+        self.assertEqual(observed[0][1], dialog_password_mode())
 
     def test_exit(self):
         self.window.exit_button.click()

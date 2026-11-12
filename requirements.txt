@@ -1,2 +1,5 @@
-# StudioNermi Cloud Lab 2.0 runtime (automated tests use Python's unittest).
+# StudioNermi Cloud Lab 3.0 (tests use Python's unittest).
 PySide6==6.8.3
+openai>=1.68.2,<3
+# Optional secure credential storage; omit if using OPENAI_API_KEY only.
+keyring>=25.6,<26
