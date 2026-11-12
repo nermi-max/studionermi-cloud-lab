@@ -1,4 +1,4 @@
-# StudioNermi Cloud Lab 3.0
+# StudioNermi Cloud Lab 3.1 — Voice Edition
 
 A Python and PySide6 desktop workspace with a clean dark interface, large controls,
 and three resizable panels. Local browsing works without a key. The cloud assistant requires an OpenAI API account,
@@ -20,8 +20,15 @@ an API key, internet access, and available API credits.
   an active request before closing safely.
 - **Settings** configures a masked API key and model (default `gpt-4.1-mini`).
   Keys can stay in memory for the current session or be saved explicitly to the
-  secure system keyring. Model selection is session-only.
-- **Exit** closes the application.
+  secure system keyring. Assistant and transcription model selections are session-only.
+- **Start Dictation / Stop Dictation** records the default microphone, then
+  transcribes speech into the message input. Existing text is preserved, including
+  edits made during recording/transcription. Edit the result before pressing Send;
+  dictation never sends a chat message automatically.
+- **Cancel Dictation** stops capture or cancels transcription and discards audio.
+  The interface shows Ready, Recording, Transcribing, or Error states. Only one
+  dictation or assistant request runs at a time.
+- **Exit** cancels active work and closes the application.
 
 Opening a project or file never imports or executes project code. Files cannot be
 edited, renamed, or deleted through the explorer or preview. The app does not
@@ -33,7 +40,7 @@ Requires Python 3.10 or newer and a graphical desktop session. From a terminal:
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-venv libgl1 libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
+sudo apt install python3 python3-venv libportaudio2 libasound2-plugins pavucontrol libgl1 libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
 cd /path/to/studionermi-cloud-lab
 python3 -m venv .venv
 source .venv/bin/activate
@@ -48,6 +55,53 @@ resolution: 1440 × 900 or larger; minimum window size: 960 × 640.
 If Qt reports a missing `xcb` dependency, confirm the system packages above are
 installed. For a Wayland issue, try `QT_QPA_PLATFORM=xcb python main.py` from your
 desktop session.
+
+## Microphone setup on Linux Mint MATE
+
+Dictation uses Python `sounddevice` and PortAudio with the **system default input**.
+The setup command above installs `libportaudio2`, the ALSA plugins (including the
+PulseAudio bridge), and `pavucontrol`. Use your existing PulseAudio server or
+PipeWire with its PulseAudio compatibility service; do not install or run a
+second audio server just for this app. Choose your default microphone in MATE
+Sound preferences or PulseAudio Volume Control, unmute it, and check the input
+level before starting dictation. With PipeWire, ensure `pipewire-pulse` is running.
+PortAudio reaches the sound server through the default ALSA/PulseAudio route.
+
+Click **Start Dictation** only when you want to record. This opens the microphone;
+there is no startup recording, wake-word listener, or continuous recording. Click
+**Stop Dictation** to stop capture and upload the recording for transcription.
+Capture stops automatically after at most two minutes (16 kHz, mono, 16-bit PCM).
+If your default device rejects this format, select a working PulseAudio/PipeWire
+input/default route and retry. The app reports a clear permission/device error
+if the microphone is missing, denied, disconnected, or unavailable. Sandboxed
+launchers may need explicit microphone permission; allow it in that launcher's
+permissions. A normal native MATE app may have no OS permission prompt.
+
+Configure **Transcription model** in Settings. The default is
+`gpt-4o-mini-transcribe`; `whisper-1` is another compatible option if available to
+your API project. Model changes apply to the current session. Dictation uses the
+same secure API key configuration as the coding assistant. Empty recordings,
+unrecognized speech, network failures, authentication failures, and quota errors
+leave your typed text unchanged and show an error you can act on.
+
+### Voice privacy and costs
+
+Record only audio you intend to send to OpenAI. After Stop Dictation (or the
+two-minute limit), audio is uploaded to the OpenAI Audio Transcription API over
+HTTPS. Audio is held in a bounded memory buffer and an in-memory WAV stream;
+**no temporary audio files are created and no recordings are saved permanently**.
+Buffers are released after success, failure, cancellation, or normal shutdown.
+This is memory cleanup, not a guarantee against OS swap or crash dumps. No audio,
+keys, or raw API exceptions are logged. Cancel during recording prevents upload;
+cancelling after transcription starts may not stop remote processing or charges.
+The resulting text stays in your editable input until you choose Send. Sending
+it then submits text to the coding assistant as a separate request.
+
+Transcription is a **separately billed API operation** and may cost money even
+when you never send the transcript as a chat message. Rates depend on the audio
+model and usage; see [OpenAI pricing](https://openai.com/api/pricing/). ChatGPT
+Plus does not include API transcription credits. OpenAI handles submitted audio
+under its API data policies. There is no local/offline speech recognition.
 
 ## OpenAI API setup and costs
 
@@ -102,8 +156,8 @@ permissions. Requests time out after 60 seconds and are not automatically retrie
 
 ## Privacy and behavior
 
-Only typed messages, successful conversation history, and a fixed assistant
-instruction are sent to `https://api.openai.com/v1`. Selected project files are
+For chat, only typed/edited messages, successful conversation history, and a fixed
+assistant instruction are sent to `https://api.openai.com/v1`. Selected project files are
 **never uploaded automatically**. Paste only code or information you intend to
 send to OpenAI. The assistant cannot read your explorer, run commands, or modify
 files; generated code is text for you to review and copy manually. No tools or
@@ -120,10 +174,17 @@ After installing requirements and activating the virtual environment:
 QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
-Tests instantiate real Qt widgets and mock the OpenAI SDK and keyring. They use
+Tests instantiate real Qt widgets and mock the OpenAI SDK, microphone/PortAudio
+module, and keyring. Tests do not require microphone hardware or PortAudio. They use
 no real credentials, network requests, or paid API calls. Coverage includes the
 existing explorer/preview/highlighting features, SDK arguments and follow-up
 history, responsive waiting, Stop, closing during requests, safe error messages,
 missing keys, credential priority, secure storage failure, masked Settings,
-and Exit. Native file picker and Secret Service integration should also be
+and Exit. Voice tests cover default input capture, WAV upload, appending/editing
+text without sending, state changes, cancellation during capture/transcription,
+bounded capture, model selection, device errors, empty responses, API failures,
+and audio cleanup. Native file picker and Secret Service integration should also be
 checked in a real Linux Mint MATE desktop session.
+
+Check actual microphone capture and routing manually on Linux Mint MATE; mocked
+tests do not verify physical devices, sound-server routing, or real API billing.

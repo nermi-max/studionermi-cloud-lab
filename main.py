@@ -1,4 +1,4 @@
-"""StudioNermi Cloud Lab 3.0: local, read-only project browsing."""
+"""StudioNermi Cloud Lab 3.1 — Voice Edition: local, read-only project browsing."""
 
 import keyword
 import re
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QDir, Qt
-from PySide6.QtGui import QColor, QFontDatabase, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import QIcon, QColor, QFontDatabase, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTreeView,
@@ -14,20 +14,21 @@ from PySide6.QtWidgets import (
 )
 
 from assistant import AssistantWorker, Credentials
+from voice import VoiceWorker
 
-VERSION = "3.0"
+VERSION = "3.1"
 MAX_PREVIEW_BYTES = 1024 * 1024
-CLOUD_MESSAGE = "OpenAI API · Only your conversation is sent. Local files are not uploaded. API usage is billed separately from ChatGPT Plus."
+CLOUD_MESSAGE = "OpenAI API · Chat text and dictation audio are sent only when requested. Project files are not uploaded. API billing is separate from ChatGPT Plus."
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, credentials, model, parent=None):
+    def __init__(self, credentials, model, parent=None, transcription_model="gpt-4o-mini-transcribe"):
         super().__init__(parent)
         self.credentials = credentials
         self.setWindowTitle("Settings")
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
-        info = QLabel("StudioNermi Cloud Lab 3.0\nDark theme · Read-only files\n\n"
+        info = QLabel("StudioNermi Cloud Lab 3.1 — Voice Edition\nDark theme · Read-only files\n\n"
                       "OPENAI_API_KEY takes priority over session and keyring keys.\n"
                       "Enter a replacement key below; existing keys are never displayed.")
         info.setWordWrap(True)
@@ -42,6 +43,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(QLabel("OpenAI model"))
         self.model_input = QLineEdit(model)
         layout.addWidget(self.model_input)
+        layout.addWidget(QLabel("Transcription model (session only)"))
+        self.transcription_model_input = QLineEdit(transcription_model)
+        layout.addWidget(self.transcription_model_input)
         self.status = QLabel("Keys stay in memory unless secure keyring storage is selected.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -55,8 +59,8 @@ class SettingsDialog(QDialog):
         self.finished.connect(lambda _: self.key_input.clear())
 
     def save(self):
-        if not self.model_input.text().strip():
-            self.status.setText("Enter a model name.")
+        if not self.model_input.text().strip() or not self.transcription_model_input.text().strip():
+            self.status.setText("Enter both model names.")
             return
         key = self.key_input.text().strip()
         if key:
@@ -128,10 +132,13 @@ class MainWindow(QMainWindow):
         self.project_path = None
         self.credentials = Credentials()
         self.ai_model = "gpt-4.1-mini"
+        self.transcription_model = "gpt-4o-mini-transcribe"
+        self.voice_worker = None
+        self.voice_cancelling = False
         self.history = []
         self.worker = None
         self.closing = False
-        self.setWindowTitle("StudioNermi Cloud Lab 3.0")
+        self.setWindowTitle("StudioNermi Cloud Lab 3.1 — Voice Edition")
         self.resize(1400, 850)
         self.setMinimumSize(960, 640)
         content = QWidget()
@@ -139,7 +146,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(18)
         header = QHBoxLayout()
-        title = QLabel("StudioNermi Cloud Lab 3.0")
+        title = QLabel("StudioNermi Cloud Lab 3.1")
+        title.setToolTip("StudioNermi Cloud Lab 3.1 — Voice Edition")
         title.setObjectName("title")
         header.addWidget(title)
         header.addStretch()
@@ -205,6 +213,21 @@ class MainWindow(QMainWindow):
         self.assistant_input.setPlaceholderText("Type a message…")
         self.assistant_input.setAccessibleName("Message to AI assistant")
         assistant.addWidget(self.assistant_input)
+        self.dictation_button = QPushButton("Start Dictation")
+        self.dictation_button.setIcon(QIcon.fromTheme("audio-input-microphone"))
+        self.dictation_button.setAccessibleName("Start Dictation")
+        self.dictation_button.setToolTip("Record the default microphone. Stop to transcribe; audio is sent to OpenAI.")
+        self.dictation_button.clicked.connect(self.toggle_dictation)
+        self.cancel_dictation_button = QPushButton("Cancel Dictation")
+        self.cancel_dictation_button.setEnabled(False)
+        self.cancel_dictation_button.clicked.connect(self.cancel_dictation)
+        voice_buttons = QHBoxLayout()
+        voice_buttons.addWidget(self.dictation_button)
+        voice_buttons.addWidget(self.cancel_dictation_button)
+        assistant.addLayout(voice_buttons)
+        self.voice_status = QLabel("Ready · Dictation records only when started (maximum 2 minutes)")
+        self.voice_status.setWordWrap(True)
+        assistant.addWidget(self.voice_status)
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_request)
@@ -293,7 +316,7 @@ class MainWindow(QMainWindow):
 
     def send_message(self):
         message = self.assistant_input.text().strip()
-        if not message or self.worker is not None:
+        if not message or self.worker is not None or self.voice_worker is not None:
             return
         key = self.credentials.resolve()
         if not key:
@@ -304,6 +327,7 @@ class MainWindow(QMainWindow):
         self.assistant_input.clear()
         self.ai_status.setText("Waiting for OpenAI…")
         self.send_button.setEnabled(False)
+        self.dictation_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.settings_button.setEnabled(False)
         self.worker = AssistantWorker(key, self.ai_model,
@@ -337,23 +361,105 @@ class MainWindow(QMainWindow):
         self.worker.deleteLater()
         self.worker = None
         self.send_button.setEnabled(True)
+        self.dictation_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.settings_button.setEnabled(True)
         if self.closing:
             self.close()
 
     def closeEvent(self, event):
-        if self.worker is not None:
+        if self.voice_worker is not None:
+            self.closing = True
+            self.cancel_dictation()
+            event.ignore()
+        elif self.worker is not None:
             self.closing = True
             self.stop_request()
             event.ignore()
         else:
             event.accept()
 
+    def toggle_dictation(self):
+        if self.voice_worker is not None:
+            if self.dictation_button.isEnabled() and not self.voice_cancelling:
+                self.voice_worker.finish_recording()
+                self.dictation_button.setEnabled(False)
+                self.voice_status.setText("Recording · Stopping microphone…")
+            return
+        if self.worker is not None or self.closing:
+            return
+        key = self.credentials.resolve()
+        if not key:
+            self.voice_status.setText("Error · Configure an API key in Settings or OPENAI_API_KEY before dictating.")
+            return
+        self.voice_cancelling = False
+        self.voice_status.setText("Recording · Opening default microphone…")
+        self.dictation_button.setText("Stop Dictation")
+        self.dictation_button.setAccessibleName("Stop Dictation")
+        self.cancel_dictation_button.setEnabled(True)
+        self.send_button.setEnabled(False)
+        self.settings_button.setEnabled(False)
+        self.voice_worker = VoiceWorker(key, self.transcription_model, self)
+        self.voice_worker.recording.connect(self.voice_recording)
+        self.voice_worker.transcribing.connect(self.voice_transcribing)
+        self.voice_worker.succeeded.connect(self.receive_transcription)
+        self.voice_worker.failed.connect(self.voice_error)
+        self.voice_worker.cancelled.connect(self.voice_cancelled)
+        self.voice_worker.finished.connect(self.voice_finished)
+        self.voice_worker.start()
+
+    def voice_recording(self):
+        if not self.voice_cancelling:
+            self.voice_status.setText("Recording · Speak now. Stop Dictation to transcribe, or Cancel Dictation.")
+
+    def voice_transcribing(self):
+        self.dictation_button.setEnabled(False)
+        if not self.voice_cancelling:
+            self.voice_status.setText("Transcribing · Audio is being sent to OpenAI…")
+
+    def receive_transcription(self, text):
+        if self.voice_cancelling:
+            return
+        existing = self.assistant_input.text()
+        combined = existing + (" " if existing and not existing[-1].isspace() else "") + text
+        # QLineEdit defaults to a 32,767 character limit; never silently truncate.
+        self.assistant_input.setMaxLength(max(self.assistant_input.maxLength(), len(combined)))
+        self.assistant_input.setText(combined)
+        self.assistant_input.setFocus()
+        self.voice_status.setText("Ready · Transcription added. Edit it, then press Send when ready.")
+
+    def voice_error(self, message):
+        if not self.voice_cancelling:
+            self.voice_status.setText("Error · " + message)
+
+    def voice_cancelled(self):
+        self.voice_status.setText("Ready · Dictation cancelled. Remote processing may still incur charges.")
+
+    def cancel_dictation(self):
+        if self.voice_worker is not None:
+            self.voice_cancelling = True
+            self.voice_worker.stop()
+            self.dictation_button.setEnabled(False)
+            self.cancel_dictation_button.setEnabled(False)
+            self.voice_status.setText("Ready · Cancelling dictation…")
+
+    def voice_finished(self):
+        self.voice_worker.deleteLater()
+        self.voice_worker = None
+        self.dictation_button.setText("Start Dictation")
+        self.dictation_button.setAccessibleName("Start Dictation")
+        self.dictation_button.setEnabled(True)
+        self.cancel_dictation_button.setEnabled(False)
+        self.send_button.setEnabled(True)
+        self.settings_button.setEnabled(True)
+        if self.closing:
+            self.close()
+
     def show_settings(self):
-        dialog = SettingsDialog(self.credentials, self.ai_model, self)
+        dialog = SettingsDialog(self.credentials, self.ai_model, self, self.transcription_model)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.ai_model = dialog.model_input.text().strip()
+            self.transcription_model = dialog.transcription_model_input.text().strip()
             self.ai_status.setText("Settings updated · Ready to send")
         dialog.deleteLater()
 

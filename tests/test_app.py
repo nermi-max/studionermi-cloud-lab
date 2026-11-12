@@ -40,7 +40,7 @@ class ApplicationTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_window_and_read_only_controls(self):
-        self.assertEqual(self.window.windowTitle(), 'StudioNermi Cloud Lab 3.0')
+        self.assertEqual(self.window.windowTitle(), 'StudioNermi Cloud Lab 3.1 — Voice Edition')
         self.assertTrue(self.window.preview.isReadOnly())
         self.assertTrue(self.window.model.isReadOnly())
         self.assertTrue(self.window.chat.isReadOnly())
