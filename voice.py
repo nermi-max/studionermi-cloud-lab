@@ -6,7 +6,7 @@ import threading
 import time
 
 from openai import AsyncOpenAI
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThread, Signal
 
 from assistant import AssistantWorker, error_message
 
@@ -107,3 +107,63 @@ class VoiceWorker(AssistantWorker):
         finally:
             self.audio.clear()
             self._key = ''
+
+
+class MicrophoneTestWorker(QThread):
+    """Offline level analysis only: never retain, encode, or upload audio."""
+    level = Signal(int)
+    completed = Signal(bool)
+    failed = Signal(str)
+    DURATION = 5.0
+    DETECTION_THRESHOLD = 0.005  # RMS relative to full-scale PCM (about -46 dBFS).
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        import array
+        import math
+        try:
+            import sounddevice as sd
+            latest_rms = 0.0
+            max_rms = 0.0
+            frames_seen = 0
+            capture_error = threading.Event()
+            limit = int(SAMPLE_RATE * self.DURATION)
+
+            def callback(data, frames, timing, status):
+                nonlocal latest_rms, max_rms, frames_seen
+                if self._stop.is_set() or frames_seen >= limit:
+                    return
+                if status:
+                    capture_error.set()
+                    return
+                # Work only on this block. No recording buffer or audio file exists.
+                samples = array.array('h')
+                samples.frombytes(bytes(data)[:max(0, limit - frames_seen) * 2])
+                frames_seen += len(samples)
+                latest_rms = (math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+                              / 32768.0) if samples else 0.0
+                max_rms = max(max_rms, latest_rms)
+
+            if self._stop.is_set():
+                return
+            with sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16',
+                                   callback=callback) as stream:
+                deadline = time.monotonic() + self.DURATION
+                while True:
+                    # A relative meter spanning -60 to 0 dBFS, updated at most 20 Hz.
+                    value = int(max(0, min(100, (20 * math.log10(max(latest_rms, 0.001)) + 60) / 60 * 100)))
+                    self.level.emit(value)
+                    if capture_error.is_set() or not stream.active:
+                        raise RuntimeError('Microphone capture failed')
+                    if self._stop.is_set() or frames_seen >= limit or time.monotonic() >= deadline:
+                        break
+                    self._stop.wait(.05)
+            self.completed.emit(max_rms >= self.DETECTION_THRESHOLD)
+        except Exception:
+            self.failed.emit(MICROPHONE_ERROR)

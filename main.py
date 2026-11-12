@@ -1,4 +1,4 @@
-"""StudioNermi Cloud Lab 3.1 — Voice Edition: local, read-only project browsing."""
+"""StudioNermi Cloud Lab 3.1.1 — Microphone Test Edition: local, read-only project browsing."""
 
 import keyword
 import re
@@ -9,14 +9,14 @@ from PySide6.QtCore import QDir, Qt
 from PySide6.QtGui import QIcon, QColor, QFontDatabase, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTreeView,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTreeView,
     QVBoxLayout, QWidget,
 )
 
 from assistant import AssistantWorker, Credentials
-from voice import VoiceWorker
+from voice import MicrophoneTestWorker, VoiceWorker
 
-VERSION = "3.1"
+VERSION = "3.1.1"
 MAX_PREVIEW_BYTES = 1024 * 1024
 CLOUD_MESSAGE = "OpenAI API · Chat text and dictation audio are sent only when requested. Project files are not uploaded. API billing is separate from ChatGPT Plus."
 
@@ -28,7 +28,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
-        info = QLabel("StudioNermi Cloud Lab 3.1 — Voice Edition\nDark theme · Read-only files\n\n"
+        info = QLabel("StudioNermi Cloud Lab 3.1.1 — Microphone Test Edition\nDark theme · Read-only files\n\n"
                       "OPENAI_API_KEY takes priority over session and keyring keys.\n"
                       "Enter a replacement key below; existing keys are never displayed.")
         info.setWordWrap(True)
@@ -133,12 +133,13 @@ class MainWindow(QMainWindow):
         self.credentials = Credentials()
         self.ai_model = "gpt-4.1-mini"
         self.transcription_model = "gpt-4o-mini-transcribe"
+        self.mic_test_worker = None
         self.voice_worker = None
         self.voice_cancelling = False
         self.history = []
         self.worker = None
         self.closing = False
-        self.setWindowTitle("StudioNermi Cloud Lab 3.1 — Voice Edition")
+        self.setWindowTitle("StudioNermi Cloud Lab 3.1.1 — Microphone Test Edition")
         self.resize(1400, 850)
         self.setMinimumSize(960, 640)
         content = QWidget()
@@ -146,8 +147,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(18)
         header = QHBoxLayout()
-        title = QLabel("StudioNermi Cloud Lab 3.1")
-        title.setToolTip("StudioNermi Cloud Lab 3.1 — Voice Edition")
+        title = QLabel("StudioNermi Cloud Lab 3.1.1")
+        title.setToolTip("StudioNermi Cloud Lab 3.1.1 — Microphone Test Edition")
         title.setObjectName("title")
         header.addWidget(title)
         header.addStretch()
@@ -223,8 +224,23 @@ class MainWindow(QMainWindow):
         self.cancel_dictation_button.clicked.connect(self.cancel_dictation)
         voice_buttons = QHBoxLayout()
         voice_buttons.addWidget(self.dictation_button)
-        voice_buttons.addWidget(self.cancel_dictation_button)
+        self.test_microphone_button = QPushButton("Test Microphone")
+        self.test_microphone_button.setAccessibleName("Test Microphone")
+        self.test_microphone_button.setToolTip("Free offline test: record levels for up to five seconds. No audio is saved or uploaded.")
+        self.test_microphone_button.clicked.connect(self.toggle_microphone_test)
+        voice_buttons.addWidget(self.test_microphone_button)
         assistant.addLayout(voice_buttons)
+        assistant.addWidget(self.cancel_dictation_button)
+        self.mic_level = QProgressBar()
+        self.mic_level.setRange(0, 100)
+        self.mic_level.setValue(0)
+        self.mic_level.setFormat("Microphone input level: %p%")
+        self.mic_level.setAccessibleName("Live microphone input level")
+        self.mic_level.hide()
+        assistant.addWidget(self.mic_level)
+        self.mic_test_status = QLabel("Offline microphone test · No API key or credits needed")
+        self.mic_test_status.setWordWrap(True)
+        assistant.addWidget(self.mic_test_status)
         self.voice_status = QLabel("Ready · Dictation records only when started (maximum 2 minutes)")
         self.voice_status.setWordWrap(True)
         assistant.addWidget(self.voice_status)
@@ -316,7 +332,7 @@ class MainWindow(QMainWindow):
 
     def send_message(self):
         message = self.assistant_input.text().strip()
-        if not message or self.worker is not None or self.voice_worker is not None:
+        if not message or self.worker is not None or self.voice_worker is not None or self.mic_test_worker is not None:
             return
         key = self.credentials.resolve()
         if not key:
@@ -328,6 +344,7 @@ class MainWindow(QMainWindow):
         self.ai_status.setText("Waiting for OpenAI…")
         self.send_button.setEnabled(False)
         self.dictation_button.setEnabled(False)
+        self.test_microphone_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.settings_button.setEnabled(False)
         self.worker = AssistantWorker(key, self.ai_model,
@@ -362,13 +379,18 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.send_button.setEnabled(True)
         self.dictation_button.setEnabled(True)
+        self.test_microphone_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.settings_button.setEnabled(True)
         if self.closing:
             self.close()
 
     def closeEvent(self, event):
-        if self.voice_worker is not None:
+        if self.mic_test_worker is not None:
+            self.closing = True
+            self.mic_test_worker.stop()
+            event.ignore()
+        elif self.voice_worker is not None:
             self.closing = True
             self.cancel_dictation()
             event.ignore()
@@ -386,13 +408,14 @@ class MainWindow(QMainWindow):
                 self.dictation_button.setEnabled(False)
                 self.voice_status.setText("Recording · Stopping microphone…")
             return
-        if self.worker is not None or self.closing:
+        if self.worker is not None or self.mic_test_worker is not None or self.closing:
             return
         key = self.credentials.resolve()
         if not key:
             self.voice_status.setText("Error · Configure an API key in Settings or OPENAI_API_KEY before dictating.")
             return
         self.voice_cancelling = False
+        self.test_microphone_button.setEnabled(False)
         self.voice_status.setText("Recording · Opening default microphone…")
         self.dictation_button.setText("Stop Dictation")
         self.dictation_button.setAccessibleName("Stop Dictation")
@@ -450,6 +473,49 @@ class MainWindow(QMainWindow):
         self.dictation_button.setAccessibleName("Start Dictation")
         self.dictation_button.setEnabled(True)
         self.cancel_dictation_button.setEnabled(False)
+        self.test_microphone_button.setEnabled(True)
+        self.send_button.setEnabled(True)
+        self.settings_button.setEnabled(True)
+        if self.closing:
+            self.close()
+
+    def toggle_microphone_test(self):
+        if self.mic_test_worker is not None:
+            self.mic_test_worker.stop()
+            self.test_microphone_button.setEnabled(False)
+            self.mic_test_status.setText("Stopping microphone test…")
+            return
+        if self.voice_worker is not None or self.worker is not None or self.closing:
+            return
+        # Intentionally no credentials lookup or API client on this path.
+        self.mic_test_status.setText("Testing microphone · Speak now (up to five seconds). Offline only.")
+        self.mic_level.setValue(0)
+        self.mic_level.show()
+        self.test_microphone_button.setText("Stop Test")
+        self.test_microphone_button.setAccessibleName("Stop Test")
+        self.dictation_button.setEnabled(False)
+        self.send_button.setEnabled(False)
+        self.settings_button.setEnabled(False)
+        self.mic_test_worker = MicrophoneTestWorker(self)
+        self.mic_test_worker.level.connect(self.mic_level.setValue)
+        self.mic_test_worker.completed.connect(self.microphone_test_result)
+        self.mic_test_worker.failed.connect(lambda message: self.mic_test_status.setText("Error · " + message))
+        self.mic_test_worker.finished.connect(self.microphone_test_finished)
+        self.mic_test_worker.start()
+
+    def microphone_test_result(self, detected):
+        self.mic_test_status.setText("Audio input detected · Offline test complete. No audio saved or uploaded."
+            if detected else "No audio input detected · Microphone may be muted or too quiet. Check the default input, unmute it, and speak closer.")
+
+    def microphone_test_finished(self):
+        self.mic_test_worker.deleteLater()
+        self.mic_test_worker = None
+        self.mic_level.setValue(0)
+        self.mic_level.hide()
+        self.test_microphone_button.setText("Test Microphone")
+        self.test_microphone_button.setAccessibleName("Test Microphone")
+        self.test_microphone_button.setEnabled(True)
+        self.dictation_button.setEnabled(True)
         self.send_button.setEnabled(True)
         self.settings_button.setEnabled(True)
         if self.closing:

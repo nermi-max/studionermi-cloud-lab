@@ -1,4 +1,4 @@
-# StudioNermi Cloud Lab 3.1 — Voice Edition
+# StudioNermi Cloud Lab 3.1.1 — Microphone Test Edition
 
 A Python and PySide6 desktop workspace with a clean dark interface, large controls,
 and three resizable panels. Local browsing works without a key. The cloud assistant requires an OpenAI API account,
@@ -25,9 +25,11 @@ an API key, internet access, and available API credits.
   transcribes speech into the message input. Existing text is preserved, including
   edits made during recording/transcription. Edit the result before pressing Send;
   dictation never sends a chat message automatically.
+- **Test Microphone / Stop Test** provides a free, offline five-second input test
+  with a live level meter; no API key, internet, credits, or transcription needed.
 - **Cancel Dictation** stops capture or cancels transcription and discards audio.
   The interface shows Ready, Recording, Transcribing, or Error states. Only one
-  dictation or assistant request runs at a time.
+  microphone test, dictation, or assistant request runs at a time.
 - **Exit** cancels active work and closes the application.
 
 Opening a project or file never imports or executes project code. Files cannot be
@@ -66,6 +68,29 @@ second audio server just for this app. Choose your default microphone in MATE
 Sound preferences or PulseAudio Volume Control, unmute it, and check the input
 level before starting dictation. With PipeWire, ensure `pipewire-pulse` is running.
 PortAudio reaches the sound server through the default ALSA/PulseAudio route.
+
+### Free offline microphone test
+
+Click **Test Microphone** beside Start Dictation and speak normally. The button
+changes to **Stop Test**, and a live input-level meter appears. Testing stops
+automatically after five seconds, or click **Stop Test** to finish early. The
+result reports **Audio input detected** or **No audio input detected**. The latter
+can mean a muted microphone, very quiet speech, or the wrong default input; check
+MATE Sound/PulseAudio Volume Control, unmute the input, and try speaking closer.
+Missing devices, permission failures, unavailable backends, and capture errors
+show an explanatory error instead. This test checks input signal, not speech
+recognition or audio quality. Detection uses an RMS threshold of about -46 dBFS;
+the meter spans -60 to 0 dBFS and is not a calibrated loudness measurement.
+
+The test uses the same sounddevice/PortAudio default input as dictation and needs
+the Linux audio packages described above. **It is entirely offline and free:**
+it never reads API credentials, creates an API client, transcribes, or uploads.
+Each audio block is measured and immediately discarded; no recording buffer,
+WAV file, or temporary recording is created. Only numeric levels are retained
+until completion, and the meter resets afterward. Audio is never logged.
+Testing and dictation cannot overlap. Chat submission is disabled during the
+short test; your typed input and conversation remain unchanged. Closing the app
+stops the test and releases the microphone. Nothing records automatically.
 
 Click **Start Dictation** only when you want to record. This opens the microphone;
 there is no startup recording, wake-word listener, or continuous recording. Click
@@ -183,7 +208,10 @@ missing keys, credential priority, secure storage failure, masked Settings,
 and Exit. Voice tests cover default input capture, WAV upload, appending/editing
 text without sending, state changes, cancellation during capture/transcription,
 bounded capture, model selection, device errors, empty responses, API failures,
-and audio cleanup. Native file picker and Secret Service integration should also be
+and audio cleanup. Offline microphone tests cover live levels, silence/mute
+guidance, early stop, automatic limits, device errors, retry, capture failure,
+closing during capture, and dictation exclusion; API and credential calls are
+explicitly forbidden in those tests. Native file picker and Secret Service integration should also be
 checked in a real Linux Mint MATE desktop session.
 
 Check actual microphone capture and routing manually on Linux Mint MATE; mocked
